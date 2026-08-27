@@ -171,7 +171,7 @@
   <script>
     const map = L.map('map').setView([51.9607, 7.6261], 13);
 
-    // CARTO Voyager Tiles with API Key and policy-compliant attribution
+    // CARTO Voyager Tiles with API Key
     L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=cb1_2afm_1_f89464dc5f7d74c5603fb650', {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions" target="_blank">CARTO</a>',
       maxZoom: 19
@@ -276,11 +276,19 @@
       return (p.x - (v.x + t * (w.x - v.x))) ** 2 + (p.y - (v.y + t * (w.y - v.y))) ** 2;
     }
 
-    async function showBusRoute(fahrtbezeichner) {
-      if (!fahrtbezeichner) {
-        console.warn('Trip identifier not found for this vehicle.');
-        return;
+    // Helper: Recursively flatten any nested GeoJSON coordinates to Point pairs
+    function extractCoordinates(coords, out = []) {
+      if (!Array.isArray(coords) || coords.length === 0) return out;
+      if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+        out.push({ x: coords[0], y: coords[1] }); // lng, lat
+      } else {
+        coords.forEach(sub => extractCoordinates(sub, out));
       }
+      return out;
+    }
+
+    async function showBusRoute(fahrtbezeichner) {
+      if (!fahrtbezeichner) return;
       if (activeFahrtbezeichner === fahrtbezeichner) return;
 
       clearCurrentRouteAndStops();
@@ -289,11 +297,12 @@
       try {
         const res = await fetch(`https://rest.busradar.conterra.de/prod/fahrten/${encodeURIComponent(fahrtbezeichner)}`);
         if (!res.ok) {
-          console.warn(`Route request failed for trip ID: ${fahrtbezeichner} (Status: ${res.status})`);
+          console.warn(`Trip route query returned ${res.status}`);
           return;
         }
         const routeGeoJSON = await res.json();
 
+        // 1. Draw route polyline
         currentRouteLayer = L.geoJSON(routeGeoJSON, {
           style: {
             color: '#0055b8',
@@ -305,18 +314,22 @@
           }
         }).addTo(map);
 
+        // 2. Parse coordinates safely
         const routeCoords = [];
-        L.geoJSON(routeGeoJSON).eachLayer(layer => {
-          if (layer.getLatLngs) {
-            const latlngs = layer.getLatLngs();
-            const flat = Array.isArray(latlngs[0]) ? latlngs.flat(2) : latlngs;
-            flat.forEach(ll => routeCoords.push({ x: ll.lng, y: ll.lat }));
-          }
-        });
+        if (routeGeoJSON.features) {
+          routeGeoJSON.features.forEach(f => {
+            if (f.geometry && f.geometry.coordinates) {
+              extractCoordinates(f.geometry.coordinates, routeCoords);
+            }
+          });
+        } else if (routeGeoJSON.geometry && routeGeoJSON.geometry.coordinates) {
+          extractCoordinates(routeGeoJSON.geometry.coordinates, routeCoords);
+        }
 
         if (routeCoords.length < 2) return;
 
-        const thresholdSq = 0.0004 ** 2;
+        // 3. Highlight each station along this line's path
+        const thresholdSq = 0.0006 ** 2; // ~60m buffer
         const addedStops = new Set();
 
         allStopFeatures.forEach(stop => {
@@ -334,7 +347,7 @@
             addedStops.add(stop.name);
 
             const stopMarker = L.circleMarker([stop.lat, stop.lng], {
-              radius: 7,
+              radius: 6,
               fillColor: '#ffffff',
               color: '#0055b8',
               weight: 3,
@@ -358,13 +371,11 @@
 
             stopMarker.on('click', (e) => {
               if (e.originalEvent) {
-                L.DomEvent.stopPropagation(e.originalEvent);
+                e.originalEvent.stopPropagation();
               }
-
               if (activeStopPopup && activeStopPopup !== stopMarker.getPopup()) {
                 map.closePopup(activeStopPopup);
               }
-
               stopMarker.openPopup();
               activeStopPopup = stopMarker.getPopup();
             });
@@ -379,7 +390,8 @@
       }
     }
 
-    map.on('click', () => {
+    // Canvas click clears active route
+    map.on('click', (e) => {
       clearCurrentRouteAndStops();
     });
 
@@ -533,7 +545,7 @@
 
           if (markers[id]) {
             markers[id].setLatLng([lat, lng]);
-            markers[id].fahrtbezeichner = fahrtbezeichner; // Keep active trip updated
+            markers[id].fahrtbezeichner = fahrtbezeichner;
             
             const iconEl = markers[id].getElement();
             if (iconEl) {
@@ -551,11 +563,20 @@
 
             marker.fahrtbezeichner = fahrtbezeichner;
 
+            // Trigger route on popup open
+            marker.on('popupopen', function () {
+              if (this.fahrtbezeichner) {
+                showBusRoute(this.fahrtbezeichner);
+              }
+            });
+
             marker.on('click', function (e) {
               if (e.originalEvent) {
-                L.DomEvent.stopPropagation(e.originalEvent);
+                e.originalEvent.stopPropagation();
               }
-              showBusRoute(this.fahrtbezeichner);
+              if (this.fahrtbezeichner) {
+                showBusRoute(this.fahrtbezeichner);
+              }
             });
 
             if (shouldBeVisible) {
