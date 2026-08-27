@@ -171,7 +171,7 @@
   <script>
     const map = L.map('map').setView([51.9607, 7.6261], 13);
 
-    // Configured with your CARTO API Key and policy-compliant attribution
+    // CARTO Voyager Tiles with API Key and policy-compliant attribution
     L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=cb1_2afm_1_f89464dc5f7d74c5603fb650', {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions" target="_blank">CARTO</a>',
       maxZoom: 19
@@ -277,13 +277,21 @@
     }
 
     async function showBusRoute(fahrtbezeichner) {
-      if (!fahrtbezeichner || activeFahrtbezeichner === fahrtbezeichner) return;
+      if (!fahrtbezeichner) {
+        console.warn('Trip identifier not found for this vehicle.');
+        return;
+      }
+      if (activeFahrtbezeichner === fahrtbezeichner) return;
+
       clearCurrentRouteAndStops();
       activeFahrtbezeichner = fahrtbezeichner;
 
       try {
         const res = await fetch(`https://rest.busradar.conterra.de/prod/fahrten/${encodeURIComponent(fahrtbezeichner)}`);
-        if (!res.ok) return;
+        if (!res.ok) {
+          console.warn(`Route request failed for trip ID: ${fahrtbezeichner} (Status: ${res.status})`);
+          return;
+        }
         const routeGeoJSON = await res.json();
 
         currentRouteLayer = L.geoJSON(routeGeoJSON, {
@@ -349,7 +357,9 @@
             });
 
             stopMarker.on('click', (e) => {
-              L.DomEvent.stopPropagation(e);
+              if (e.originalEvent) {
+                L.DomEvent.stopPropagation(e.originalEvent);
+              }
 
               if (activeStopPopup && activeStopPopup !== stopMarker.getPopup()) {
                 map.closePopup(activeStopPopup);
@@ -523,6 +533,8 @@
 
           if (markers[id]) {
             markers[id].setLatLng([lat, lng]);
+            markers[id].fahrtbezeichner = fahrtbezeichner; // Keep active trip updated
+            
             const iconEl = markers[id].getElement();
             if (iconEl) {
               const innerBadge = iconEl.querySelector('.bus-marker');
@@ -537,9 +549,13 @@
               icon: createBusIcon(line, delaySec)
             }).bindPopup(popupContent);
 
-            marker.on('click', (e) => {
-              L.DomEvent.stopPropagation(e);
-              showBusRoute(fahrtbezeichner);
+            marker.fahrtbezeichner = fahrtbezeichner;
+
+            marker.on('click', function (e) {
+              if (e.originalEvent) {
+                L.DomEvent.stopPropagation(e.originalEvent);
+              }
+              showBusRoute(this.fahrtbezeichner);
             });
 
             if (shouldBeVisible) {
