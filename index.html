@@ -4,14 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Münster Real-Time Bus Tracker</title>
-  
+
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  
+
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     #map { height: 100vh; width: 100vw; }
-    
+
     .leaflet-marker-icon.custom-bus-icon {
       transition: transform 5s linear;
       cursor: pointer;
@@ -104,6 +104,31 @@
 
     .popup-content { font-size: 13.5px; line-height: 1.6; }
     .popup-content strong { color: #222; }
+
+    /* Toast for silent-failure feedback */
+    .route-toast {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      z-index: 1200;
+      background: rgba(30, 30, 30, 0.92);
+      color: #fff;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 500;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease, transform 0.25s ease;
+      max-width: 90vw;
+      text-align: center;
+    }
+    .route-toast.visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
   </style>
 </head>
 <body>
@@ -138,6 +163,7 @@
   </div>
 
   <div id="map"></div>
+  <div id="route-toast" class="route-toast"></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
@@ -156,6 +182,7 @@
     let currentRouteGroup = L.layerGroup().addTo(map);
     let searchMarker = null;
     let activeFahrtbezeichner = null;
+    let routeRequestToken = 0; // guards against stale/late fetch responses overwriting a newer selection
 
     let selectedLineFilter = 'ALL';
     const knownLines = new Set();
@@ -229,32 +256,71 @@
       activeFahrtbezeichner = null;
     }
 
+    // --- Toast helper: gives visible feedback instead of silently failing ---
+    let toastTimeoutId = null;
+    function showToast(message) {
+      const toastEl = document.getElementById('route-toast');
+      toastEl.textContent = message;
+      toastEl.classList.add('visible');
+      if (toastTimeoutId) clearTimeout(toastTimeoutId);
+      toastTimeoutId = setTimeout(() => {
+        toastEl.classList.remove('visible');
+      }, 3000);
+    }
+
     async function showBusRoute(fahrtbezeichner) {
-      if (!fahrtbezeichner || activeFahrtbezeichner === fahrtbezeichner) return;
+      if (!fahrtbezeichner) {
+        // This is the main reason routes sometimes don't appear: the vehicle's
+        // feed entry has no trip identifier (e.g. an unscheduled/depot run),
+        // so there is nothing to fetch a route for.
+        showToast('No route path available for this bus.');
+        return;
+      }
+      if (activeFahrtbezeichner === fahrtbezeichner) return;
+
       clearCurrentRoute();
       activeFahrtbezeichner = fahrtbezeichner;
 
+      const myToken = ++routeRequestToken;
+
       try {
         const res = await fetch(`https://rest.busradar.conterra.de/prod/fahrten/${encodeURIComponent(fahrtbezeichner)}`);
-        if (!res.ok) return;
+
+        // If the user clicked another bus while this request was in flight, drop this stale response.
+        if (myToken !== routeRequestToken) return;
+
+        if (!res.ok) {
+          showToast('Route data unavailable for this trip.');
+          return;
+        }
+
         const data = await res.json();
 
-        // 1. Render the bold blue route line and white circular stop pins directly from the GeoJSON
+        if (myToken !== routeRequestToken) return;
+
+        const hasFeatures = data && Array.isArray(data.features) && data.features.length > 0;
+        if (!hasFeatures) {
+          showToast('No route path available for this bus.');
+          return;
+        }
+
+        // 1. Render the bold blue dashed route line and white circular stop pins from the GeoJSON
         const routeLayer = L.geoJSON(data, {
           style: (feature) => {
             if (feature.geometry.type === 'LineString' || feature.geometry.type === 'MultiLineString') {
               return {
                 color: '#0055b8',
-                weight: 5,
-                opacity: 0.9,
+                weight: 6,
+                opacity: 0.95,
                 lineCap: 'round',
-                lineJoin: 'round'
+                lineJoin: 'round',
+                dashArray: '1, 10'
               };
             }
           },
           pointToLayer: (feature, latlng) => {
             return L.circleMarker(latlng, {
-              radius: 6,
+              radius: 7,
               fillColor: '#ffffff',
               color: '#0055b8',
               weight: 3,
@@ -277,8 +343,17 @@
 
         currentRouteGroup.addLayer(routeLayer);
 
+        // Make sure the whole route is visible, even if it extends off the current view.
+        const bounds = routeLayer.getBounds();
+        if (bounds.isValid()) {
+          map.flyToBounds(bounds, { padding: [60, 60], maxZoom: 16, animate: true, duration: 0.8 });
+        }
+
       } catch (err) {
         console.warn('Could not load route:', err);
+        if (myToken === routeRequestToken) {
+          showToast('Could not load route for this bus.');
+        }
       }
     }
 
@@ -362,7 +437,7 @@
       try {
         const response = await fetch('https://rest.busradar.conterra.de/prod/fahrzeuge');
         const data = await response.json();
-        
+
         const activeIds = new Set();
         const detectedLines = new Set();
 
@@ -376,7 +451,10 @@
           const lng = coords[0];
           const line = String(props.linientext || props.linienname || '').trim();
           const delaySec = props.delay || 0;
-          const fahrtbezeichner = props.fahrtbezeichner;
+          // Keep the trip id distinct from the marker id: some vehicles have no
+          // fahrtbezeichner (e.g. depot / unscheduled runs), in which case there
+          // is genuinely no route to draw for them.
+          const fahrtbezeichner = props.fahrtbezeichner || null;
 
           activeIds.add(id);
           if (line) detectedLines.add(line);
