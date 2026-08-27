@@ -13,7 +13,7 @@
     #map { height: 100vh; width: 100vw; }
 
     .leaflet-marker-icon.custom-bus-icon {
-      transition: transform 4s linear;
+      transition: transform 5s linear;
       cursor: pointer;
     }
 
@@ -103,7 +103,9 @@
     }
 
     .popup-content { font-size: 13.5px; line-height: 1.6; }
+    .popup-content strong { color: #222; }
 
+    /* Toast for silent-failure feedback */
     .route-toast {
       position: absolute;
       bottom: 24px;
@@ -168,22 +170,22 @@
   <script>
     const map = L.map('map').setView([51.9607, 7.6261], 13);
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+    // Clean OpenStreetMap tiles (No API Key Required)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
       maxZoom: 19
     }).addTo(map);
 
     const markers = {};
     const markerData = {};
     const stopsLookup = {};
-    let allStopFeatures = [];
+    let allStopFeatures = []; // flat list of every known stop, used for proximity-matching against a route line
     let currentRouteGroup = L.layerGroup().addTo(map);
     let searchMarker = null;
     let activeFahrtbezeichner = null;
-    let routeRequestToken = 0;
-    let selectedLineFilter = 'ALL';
-    const knownLines = new Set();
+    let routeRequestToken = 0; // guards against stale/late fetch responses overwriting a newer selection
 
+    // Squared distance from point p to segment v-w (in lat/lng "units", good enough for short local distances)
     function distToSegmentSquared(p, v, w) {
       const l2 = (w.x - v.x) ** 2 + (w.y - v.y) ** 2;
       if (l2 === 0) return (p.x - v.x) ** 2 + (p.y - v.y) ** 2;
@@ -191,6 +193,9 @@
       t = Math.max(0, Math.min(1, t));
       return (p.x - (v.x + t * (w.x - v.x))) ** 2 + (p.y - (v.y + t * (w.y - v.y))) ** 2;
     }
+
+    let selectedLineFilter = 'ALL';
+    const knownLines = new Set();
 
     function getDelayClass(delaySeconds) {
       const mins = (delaySeconds || 0) / 60;
@@ -261,6 +266,7 @@
       activeFahrtbezeichner = null;
     }
 
+    // --- Toast helper: gives visible feedback instead of silently failing ---
     let toastTimeoutId = null;
     function showToast(message) {
       const toastEl = document.getElementById('route-toast');
@@ -274,45 +280,66 @@
 
     async function showBusRoute(fahrtbezeichner) {
       if (!fahrtbezeichner) {
-        showToast('No active trip ID available for this vehicle.');
+        // This is the main reason routes sometimes don't appear: the vehicle's
+        // feed entry has no trip identifier (e.g. an unscheduled/depot run),
+        // so there is nothing to fetch a route for.
+        showToast('No route path available for this bus.');
         return;
       }
       if (activeFahrtbezeichner === fahrtbezeichner) return;
 
       clearCurrentRoute();
       activeFahrtbezeichner = fahrtbezeichner;
+
       const myToken = ++routeRequestToken;
 
       try {
         const res = await fetch(`https://rest.busradar.conterra.de/prod/fahrten/${encodeURIComponent(fahrtbezeichner)}`);
+
+        // If the user clicked another bus while this request was in flight, drop this stale response.
         if (myToken !== routeRequestToken) return;
 
         if (!res.ok) {
-          showToast('Route shape not available for this trip.');
+          console.warn(`[route] /fahrten/${fahrtbezeichner} returned HTTP ${res.status}. This trip likely has no stored route shape (this endpoint is undocumented and doesn't cover all trips).`);
+          showToast('Route data unavailable for this trip.');
           return;
         }
 
         const data = await res.json();
+
         if (myToken !== routeRequestToken) return;
 
-        if (!data || (!data.features && !data.geometry && !data.coordinates)) {
+        const hasFeatures = data && Array.isArray(data.features) && data.features.length > 0;
+        if (!hasFeatures) {
+          console.warn(`[route] /fahrten/${fahrtbezeichner} returned HTTP 200 but with no features. Raw response:`, data);
           showToast('No route path available for this bus.');
           return;
         }
 
+        // 1. Render the bold blue dashed route line from the GeoJSON.
+        // Note: this endpoint is undocumented and its response typically contains only
+        // LineString geometry — it does NOT reliably include the individual stops as
+        // separate Point features. So stops are derived independently below, by
+        // checking which known city stops (from /haltestellen) lie on this line,
+        // rather than trusting the /fahrten response to enumerate them itself.
         const routeLayer = L.geoJSON(data, {
-          style: {
-            color: '#0055b8',
-            weight: 5,
-            opacity: 0.85,
-            dashArray: '8, 8',
-            lineCap: 'round',
-            lineJoin: 'round'
+          style: (feature) => {
+            if (feature.geometry.type === 'LineString' || feature.geometry.type === 'MultiLineString') {
+              return {
+                color: '#0055b8',
+                weight: 6,
+                opacity: 0.95,
+                lineCap: 'round',
+                lineJoin: 'round',
+                dashArray: '1, 10'
+              };
+            }
           }
         });
 
         currentRouteGroup.addLayer(routeLayer);
 
+        // 2. Flatten the line's coordinates so we can measure distance from each known stop to the route.
         const routeCoords = [];
         routeLayer.eachLayer(layer => {
           if (layer.getLatLngs) {
@@ -322,6 +349,7 @@
           }
         });
 
+        // 3. Find every known stop within ~40m of the route line and pin it with a white circle marker.
         if (routeCoords.length >= 2) {
           const thresholdSq = 0.0004 ** 2;
           const addedStops = new Set();
@@ -341,13 +369,15 @@
               addedStops.add(stop.name);
 
               const stopMarker = L.circleMarker([stop.lat, stop.lng], {
-                radius: 6,
+                radius: 7,
                 fillColor: '#ffffff',
                 color: '#0055b8',
                 weight: 3,
                 opacity: 1,
                 fillOpacity: 1
-              }).bindPopup(`
+              });
+
+              stopMarker.bindPopup(`
                 <div style="font-size: 13px; line-height: 1.4;">
                   <strong style="color: #0055b8;">Bus Station:</strong><br/>
                   <span style="font-weight: 600;">${stop.name}</span>
@@ -359,12 +389,14 @@
           });
         }
 
+        // Make sure the whole route is visible, even if it extends off the current view.
         const bounds = routeLayer.getBounds();
         if (bounds.isValid()) {
-          map.flyToBounds(bounds, { padding: [60, 60], maxZoom: 15, duration: 0.8 });
+          map.flyToBounds(bounds, { padding: [60, 60], maxZoom: 16, animate: true, duration: 0.8 });
         }
 
       } catch (err) {
+        console.warn('Could not load route:', err);
         if (myToken === routeRequestToken) {
           showToast('Could not load route for this bus.');
         }
@@ -460,7 +492,7 @@
 
         (data.features || []).forEach(bus => {
           const props = bus.properties || {};
-          const id = props.fahrtbezeichner || props.fahrzeugid || props.id;
+          const id = props.fahrtbezeichner || props.fahrzeugid;
           if (!id || !bus.geometry || !bus.geometry.coordinates) return;
 
           const coords = bus.geometry.coordinates;
@@ -468,11 +500,14 @@
           const lng = coords[0];
           const line = String(props.linientext || props.linienname || '').trim();
           const delaySec = props.delay || 0;
-          const fahrtbezeichner = props.fahrtbezeichner || props.fahrtid || props.tripId || null;
+          // Keep the trip id distinct from the marker id: some vehicles have no
+          // fahrtbezeichner (e.g. depot / unscheduled runs), in which case there
+          // is genuinely no route to draw for them.
+          const fahrtbezeichner = props.fahrtbezeichner || null;
 
           activeIds.add(id);
           if (line) detectedLines.add(line);
-          markerData[id] = { line: line, fahrtbezeichner: fahrtbezeichner };
+          markerData[id] = { line: line };
 
           const popupContent = createPopupHTML(props, lat, lng);
           const shouldBeVisible = (selectedLineFilter === 'ALL' || line === selectedLineFilter);
@@ -496,8 +531,7 @@
 
             marker.fahrtbezeichner = fahrtbezeichner;
 
-            marker.on('click', (e) => {
-              L.DomEvent.stopPropagation(e);
+            marker.on('click', () => {
               showBusRoute(marker.fahrtbezeichner);
             });
 
