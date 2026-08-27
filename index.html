@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Münster Real-Time Bus Tracker</title>
   
-  <!-- Leaflet Map Styles -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   
   <style>
@@ -13,7 +12,6 @@
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     #map { height: 100vh; width: 100vw; }
     
-    /* Marker animations */
     .leaflet-marker-icon.custom-bus-icon {
       transition: transform 5s linear;
       cursor: pointer;
@@ -34,13 +32,11 @@
       transition: background-color 0.4s ease;
     }
 
-    /* Delay Colors */
     .bus-marker.delay-green  { background: #28a745; }
     .bus-marker.delay-blue   { background: #007bff; }
     .bus-marker.delay-yellow { background: #e0a800; color: #1a1a1a; }
     .bus-marker.delay-red    { background: #dc3545; }
 
-    /* Top-Right Panel */
     .top-right-panel {
       position: absolute;
       top: 16px;
@@ -60,14 +56,7 @@
     .panel-subtitle { font-size: 13px; color: #666; margin: 4px 0 12px 0; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0; }
 
     .control-group { margin-bottom: 12px; }
-
-    .control-label {
-      font-weight: 600;
-      font-size: 12.5px;
-      color: #475569;
-      margin-bottom: 4px;
-      display: block;
-    }
+    .control-label { font-weight: 600; font-size: 12.5px; color: #475569; margin-bottom: 4px; display: block; }
 
     .line-select {
       width: 100%;
@@ -80,10 +69,6 @@
       outline: none;
       cursor: pointer;
     }
-    .line-select:focus {
-      border-color: #0066cc;
-      box-shadow: 0 0 0 2px rgba(0, 102, 204, 0.2);
-    }
 
     .search-box { display: flex; gap: 6px; }
     .search-input {
@@ -93,10 +78,6 @@
       border-radius: 6px;
       font-size: 13px;
       outline: none;
-    }
-    .search-input:focus {
-      border-color: #0066cc;
-      box-shadow: 0 0 0 2px rgba(0, 102, 204, 0.2);
     }
     .search-btn {
       padding: 8px 12px;
@@ -108,7 +89,6 @@
       font-weight: 600;
       cursor: pointer;
     }
-    .search-btn:hover { background: #0052a3; }
 
     .legend-title { font-weight: 700; margin: 12px 0 6px 0; color: #333; }
     .legend-item { display: flex; align-items: center; gap: 10px; margin: 5px 0; font-size: 13px; }
@@ -135,7 +115,6 @@
       <span id="last-updated" style="font-size: 12px;">Loading stops...</span>
     </div>
 
-    <!-- Dropdown: Select Bus Line -->
     <div class="control-group">
       <label for="line-filter" class="control-label">Filter Bus Line</label>
       <select id="line-filter" class="line-select">
@@ -143,7 +122,6 @@
       </select>
     </div>
 
-    <!-- Street Address Search -->
     <div class="control-group">
       <label for="address-input" class="control-label">Search Location</label>
       <div class="search-box">
@@ -166,9 +144,9 @@
   <script>
     const map = L.map('map').setView([51.9607, 7.6261], 13);
 
-    // Basemap Layer
-    L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=cb1_2afm_1_f89464dc5f7d74c5603fb650', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions" target="_blank">CARTO</a>',
+    // Reliable public OpenStreetMap tiles without watermark/API keys
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       maxZoom: 19
     }).addTo(map);
 
@@ -204,26 +182,29 @@
     }
 
     function resolveStopName(rawNr, busLat, busLng) {
-      if (!rawNr && rawNr !== 0) return 'Unknown';
+      if (!rawNr) return 'Unknown';
       const nrStr = String(rawNr).trim();
       const prefix5 = nrStr.substring(0, 5);
-      const candidates = stopsLookup[prefix5] || stopsLookup[nrStr];
+      const candidates = stopsLookup[prefix5];
 
       if (!candidates || candidates.length === 0) return `Stop #${nrStr}`;
-      if (candidates.length === 1 || busLat === undefined) return candidates[0].name;
+      if (candidates.length === 1) return candidates[0].name;
 
-      let best = candidates[0];
-      let minDistSq = Infinity;
-      for (const cand of candidates) {
-        const dLat = cand.lat - busLat;
-        const dLng = cand.lng - busLng;
-        const distSq = dLat * dLat + dLng * dLng;
-        if (distSq < minDistSq) {
-          minDistSq = distSq;
-          best = cand;
+      if (busLat !== undefined && busLng !== undefined) {
+        let best = candidates[0];
+        let minDistSq = Infinity;
+        for (const cand of candidates) {
+          const dLat = cand.lat - busLat;
+          const dLng = cand.lng - busLng;
+          const distSq = dLat * dLat + dLng * dLng;
+          if (distSq < minDistSq) {
+            minDistSq = distSq;
+            best = cand;
+          }
         }
+        return best.name;
       }
-      return best.name;
+      return candidates[0].name;
     }
 
     function createPopupHTML(props, busLat, busLng) {
@@ -260,123 +241,96 @@
       }
     }
 
-    function extractCoordinates(coords, out = []) {
-      if (!Array.isArray(coords) || coords.length === 0) return out;
-      if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
-        out.push([coords[1], coords[0]]); // Leaflet uses [lat, lng]
-      } else {
-        coords.forEach(sub => extractCoordinates(sub, out));
-      }
-      return out;
+    function distToSegmentSquared(p, v, w) {
+      const l2 = (w.x - v.x) ** 2 + (w.y - v.y) ** 2;
+      if (l2 === 0) return (p.x - v.x) ** 2 + (p.y - v.y) ** 2;
+      let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+      t = Math.max(0, Math.min(1, t));
+      return (p.x - (v.x + t * (w.x - v.x))) ** 2 + (p.y - (v.y + t * (w.y - v.y))) ** 2;
     }
 
     async function showBusRoute(fahrtbezeichner) {
+      console.log('Fetching route for fahrtbezeichner:', fahrtbezeichner);
       if (!fahrtbezeichner || activeFahrtbezeichner === fahrtbezeichner) return;
-
       clearCurrentRouteAndStops();
       activeFahrtbezeichner = fahrtbezeichner;
 
       try {
-        const res = await fetch(`https://rest.busradar.conterra.de/prod/fahrten/${encodeURIComponent(fahrtbezeichner)}`);
-        if (!res.ok) return;
+        const url = `https://rest.busradar.conterra.de/prod/fahrten/${encodeURIComponent(fahrtbezeichner)}`;
+        const res = await fetch(url);
+        if (!res.ok) {
+          console.warn('Trip route endpoint returned status:', res.status);
+          return;
+        }
+        const routeGeoJSON = await res.json();
 
-        const routeData = await res.json();
-        const features = routeData.features || (routeData.type === 'Feature' ? [routeData] : []);
+        currentRouteLayer = L.geoJSON(routeGeoJSON, {
+          style: {
+            color: '#0055b8',
+            weight: 5,
+            opacity: 0.85,
+            dashArray: '8, 8',
+            lineCap: 'round',
+            lineJoin: 'round'
+          }
+        }).addTo(map);
 
-        const stopFeatures = [];
-        const lineFeatures = [];
-
-        features.forEach(f => {
-          if (!f.geometry) return;
-          if (f.geometry.type === 'Point') {
-            stopFeatures.push(f);
-          } else if (f.geometry.type.includes('LineString')) {
-            lineFeatures.push(f);
+        const routeCoords = [];
+        L.geoJSON(routeGeoJSON).eachLayer(layer => {
+          if (layer.getLatLngs) {
+            const latlngs = layer.getLatLngs();
+            const flat = Array.isArray(latlngs[0]) ? latlngs.flat(2) : latlngs;
+            flat.forEach(ll => routeCoords.push({ x: ll.lng, y: ll.lat }));
           }
         });
 
-        // 1. Draw route polyline
-        if (lineFeatures.length > 0) {
-          currentRouteLayer = L.geoJSON({ type: 'FeatureCollection', features: lineFeatures }, {
-            style: {
-              color: '#0055b8',
-              weight: 4,
-              opacity: 0.9,
-              dashArray: '8, 8',
-              lineCap: 'round',
-              lineJoin: 'round'
-            }
-          }).addTo(map);
-        } else {
-          currentRouteLayer = L.geoJSON(routeData, {
-            filter: f => f.geometry && f.geometry.type !== 'Point',
-            style: {
-              color: '#0055b8',
-              weight: 4,
-              opacity: 0.9,
-              dashArray: '8, 8',
-              lineCap: 'round',
-              lineJoin: 'round'
-            }
-          }).addTo(map);
-        }
+        if (routeCoords.length < 2) return;
 
-        // 2. Render route stop markers
-        const stopsToDraw = [];
+        const thresholdSq = 0.0004 ** 2;
+        const addedStops = new Set();
 
-        if (stopFeatures.length > 0) {
-          stopFeatures.forEach(f => {
-            const coords = f.geometry.coordinates;
-            const props = f.properties || {};
-            stopsToDraw.push({
-              lat: coords[1],
-              lng: coords[0],
-              name: props.lbez || props.kbez || resolveStopName(props.nr, coords[1], coords[0])
+        allStopFeatures.forEach(stop => {
+          const sPt = { x: stop.lng, y: stop.lat };
+          let isNearRoute = false;
+
+          for (let i = 0; i < routeCoords.length - 1; i++) {
+            if (distToSegmentSquared(sPt, routeCoords[i], routeCoords[i + 1]) < thresholdSq) {
+              isNearRoute = true;
+              break;
+            }
+          }
+
+          if (isNearRoute && !addedStops.has(stop.name)) {
+            addedStops.add(stop.name);
+
+            const stopMarker = L.circleMarker([stop.lat, stop.lng], {
+              radius: 6,
+              fillColor: '#ffffff',
+              color: '#0055b8',
+              weight: 3,
+              opacity: 1,
+              fillOpacity: 1
             });
-          });
-        } else {
-          // Fallback to geometric proximity if stops are omitted from the payload
-          const routeCoords = [];
-          extractCoordinates(routeData, routeCoords);
-          const thresholdSq = 0.0007 ** 2;
-          const added = new Set();
 
-          allStopFeatures.forEach(stop => {
-            for (let i = 0; i < routeCoords.length; i++) {
-              const dLat = stop.lat - routeCoords[i][0];
-              const dLng = stop.lng - routeCoords[i][1];
-              if (dLat * dLat + dLng * dLng < thresholdSq) {
-                if (!added.has(stop.name)) {
-                  added.add(stop.name);
-                  stopsToDraw.push(stop);
-                }
-                break;
+            stopMarker.bindPopup(`
+              <div style="font-size:13px; line-height: 1.4;">
+                <strong style="color: #0055b8;">Bus Station:</strong><br/>
+                <span style="font-weight: 600;">${stop.name}</span>
+              </div>
+            `);
+
+            stopMarker.on('click', (e) => {
+              L.DomEvent.stopPropagation(e);
+              if (activeStopPopup && activeStopPopup !== stopMarker.getPopup()) {
+                map.closePopup(activeStopPopup);
               }
-            }
-          });
-        }
+              stopMarker.openPopup();
+              activeStopPopup = stopMarker.getPopup();
+            });
 
-        // Draw the hollow blue stop circles matching the reference design
-        stopsToDraw.forEach(stop => {
-          const stopMarker = L.circleMarker([stop.lat, stop.lng], {
-            radius: 5,
-            fillColor: '#ffffff',
-            color: '#0055b8',
-            weight: 3,
-            opacity: 1,
-            fillOpacity: 1,
-            pane: 'markerPane'
-          });
-
-          stopMarker.bindPopup(`
-            <div style="font-size:13px; line-height: 1.4;">
-              <strong style="color: #0055b8;">Bus Station:</strong><br/>
-              <span style="font-weight: 600;">${stop.name}</span>
-            </div>
-          `, { offset: [0, -4] });
-
-          stopMarker.addTo(map);
-          currentStopMarkers.push(stopMarker);
+            stopMarker.addTo(map);
+            currentStopMarkers.push(stopMarker);
+          }
         });
 
       } catch (err) {
@@ -439,43 +393,6 @@
       applyLineFilter();
     });
 
-    async function searchAddress() {
-      const query = document.getElementById('address-input').value.trim();
-      if (!query) return;
-
-      const nominatimUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query + ', Münster')}&viewbox=7.50,51.85,7.75,52.05&bounded=1&limit=1`;
-
-      try {
-        const res = await fetch(nominatimUrl);
-        const results = await res.json();
-        if (results && results.length > 0) {
-          const lat = parseFloat(results[0].lat);
-          const lon = parseFloat(results[0].lon);
-
-          if (searchMarker) map.removeLayer(searchMarker);
-
-          searchMarker = L.marker([lat, lon], {
-            icon: L.divIcon({
-              html: `<div style="background:#e11d48;color:#fff;padding:4px 8px;border-radius:12px;font-size:11px;font-weight:700;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.3);white-space:nowrap;">📍 Destination</div>`,
-              iconAnchor: [45, 15]
-            })
-          }).bindPopup(`<strong>Searched Location:</strong><br>${results[0].display_name}`).addTo(map);
-
-          map.flyTo([lat, lon], 16, { animate: true, duration: 1.5 });
-          searchMarker.openPopup();
-        } else {
-          alert('Address not found in Münster. Please check spelling.');
-        }
-      } catch (err) {
-        console.error('Search error:', err);
-      }
-    }
-
-    document.getElementById('search-btn').addEventListener('click', searchAddress);
-    document.getElementById('address-input').addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') searchAddress();
-    });
-
     async function loadStopsLookup() {
       try {
         const res = await fetch('https://rest.busradar.conterra.de/prod/haltestellen');
@@ -503,6 +420,7 @@
             allStopFeatures.push(stopObj);
           }
         });
+        console.log(`Loaded ${allStopFeatures.length} stops.`);
       } catch (err) {
         console.warn('Could not load haltestellen dictionary:', err);
       }
@@ -531,7 +449,7 @@
 
           activeIds.add(id);
           if (line) detectedLines.add(line);
-          markerData[id] = { line: line };
+          markerData[id] = { line: line, fahrtbezeichner: fahrtbezeichner };
 
           const popupContent = createPopupHTML(props, lat, lng);
           const shouldBeVisible = (selectedLineFilter === 'ALL' || line === selectedLineFilter);
@@ -539,7 +457,6 @@
           if (markers[id]) {
             markers[id].setLatLng([lat, lng]);
             markers[id].fahrtbezeichner = fahrtbezeichner;
-            
             const iconEl = markers[id].getElement();
             if (iconEl) {
               const innerBadge = iconEl.querySelector('.bus-marker');
@@ -556,10 +473,9 @@
 
             marker.fahrtbezeichner = fahrtbezeichner;
 
-            marker.on('click', function (e) {
-              if (this.fahrtbezeichner) {
-                showBusRoute(this.fahrtbezeichner);
-              }
+            // Trigger route draw whenever the popup opens (click or programmatic)
+            marker.on('popupopen', () => {
+              showBusRoute(marker.fahrtbezeichner);
             });
 
             if (shouldBeVisible) {
@@ -569,7 +485,7 @@
           }
         });
 
-        // Remove inactive buses
+        // Clean up inactive markers
         Object.keys(markers).forEach(id => {
           if (!activeIds.has(id)) {
             if (map.hasLayer(markers[id])) map.removeLayer(markers[id]);
