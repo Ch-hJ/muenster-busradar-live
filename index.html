@@ -171,8 +171,9 @@
   <script>
     const map = L.map('map').setView([51.9607, 7.6261], 13);
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+    // Configured with your CARTO API Key and policy-compliant attribution
+    L.tileLayer('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=cb1_2afm_1_f89464dc5f7d74c5603fb650', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors, &copy; <a href="https://carto.com/attributions" target="_blank">CARTO</a>',
       maxZoom: 19
     }).addTo(map);
 
@@ -184,7 +185,7 @@
     let currentStopMarkers = [];
     let searchMarker = null;
     let activeFahrtbezeichner = null;
-    let activeStopPopup = null; // Tracks current open station popup
+    let activeStopPopup = null;
 
     let selectedLineFilter = 'ALL';
     const knownLines = new Set();
@@ -275,7 +276,6 @@
       return (p.x - (v.x + t * (w.x - v.x))) ** 2 + (p.y - (v.y + t * (w.y - v.y))) ** 2;
     }
 
-    // Render Route Polyline + Interactive Stop Pushpins
     async function showBusRoute(fahrtbezeichner) {
       if (!fahrtbezeichner || activeFahrtbezeichner === fahrtbezeichner) return;
       clearCurrentRouteAndStops();
@@ -286,7 +286,6 @@
         if (!res.ok) return;
         const routeGeoJSON = await res.json();
 
-        // 1. Draw route line
         currentRouteLayer = L.geoJSON(routeGeoJSON, {
           style: {
             color: '#0055b8',
@@ -298,7 +297,6 @@
           }
         }).addTo(map);
 
-        // 2. Extract line coordinates
         const routeCoords = [];
         L.geoJSON(routeGeoJSON).eachLayer(layer => {
           if (layer.getLatLngs) {
@@ -310,7 +308,6 @@
 
         if (routeCoords.length < 2) return;
 
-        // 3. Find stops within ~40 meters of the route line
         const thresholdSq = 0.0004 ** 2;
         const addedStops = new Set();
 
@@ -351,7 +348,6 @@
               offset: [0, -5]
             });
 
-            // Closes any previously opened station popup when opening a new one
             stopMarker.on('click', (e) => {
               L.DomEvent.stopPropagation(e);
 
@@ -373,7 +369,6 @@
       }
     }
 
-    // Clear route and close popups only when clicking empty map canvas
     map.on('click', () => {
       clearCurrentRouteAndStops();
     });
