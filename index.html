@@ -112,7 +112,7 @@
     <div class="panel-title">Bus Radar Münster</div>
     <div class="panel-subtitle">
       Active buses: <strong id="bus-count">0</strong><br />
-      <span id="last-updated" style="font-size: 12px;">Loading stops...</span>
+      <span id="last-updated" style="font-size: 12px;">Loading data...</span>
     </div>
 
     <div class="control-group">
@@ -144,21 +144,18 @@
   <script>
     const map = L.map('map').setView([51.9607, 7.6261], 13);
 
-    // Reliable public OpenStreetMap tiles without watermark/API keys
+    // Clean OpenStreetMap tiles (No API Key Required)
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      attribution: '&copy; OpenStreetMap contributors',
       maxZoom: 19
     }).addTo(map);
 
     const markers = {};
     const markerData = {};
     const stopsLookup = {};
-    let allStopFeatures = [];
-    let currentRouteLayer = null;
-    let currentStopMarkers = [];
+    let currentRouteGroup = L.layerGroup().addTo(map);
     let searchMarker = null;
     let activeFahrtbezeichner = null;
-    let activeStopPopup = null;
 
     let selectedLineFilter = 'ALL';
     const knownLines = new Set();
@@ -227,83 +224,36 @@
       `;
     }
 
-    function clearCurrentRouteAndStops() {
-      if (currentRouteLayer) {
-        map.removeLayer(currentRouteLayer);
-        currentRouteLayer = null;
-      }
-      currentStopMarkers.forEach(m => map.removeLayer(m));
-      currentStopMarkers = [];
+    function clearCurrentRoute() {
+      currentRouteGroup.clearLayers();
       activeFahrtbezeichner = null;
-      if (activeStopPopup) {
-        map.closePopup(activeStopPopup);
-        activeStopPopup = null;
-      }
-    }
-
-    function distToSegmentSquared(p, v, w) {
-      const l2 = (w.x - v.x) ** 2 + (w.y - v.y) ** 2;
-      if (l2 === 0) return (p.x - v.x) ** 2 + (p.y - v.y) ** 2;
-      let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
-      t = Math.max(0, Math.min(1, t));
-      return (p.x - (v.x + t * (w.x - v.x))) ** 2 + (p.y - (v.y + t * (w.y - v.y))) ** 2;
     }
 
     async function showBusRoute(fahrtbezeichner) {
-      console.log('Fetching route for fahrtbezeichner:', fahrtbezeichner);
       if (!fahrtbezeichner || activeFahrtbezeichner === fahrtbezeichner) return;
-      clearCurrentRouteAndStops();
+      clearCurrentRoute();
       activeFahrtbezeichner = fahrtbezeichner;
 
       try {
-        const url = `https://rest.busradar.conterra.de/prod/fahrten/${encodeURIComponent(fahrtbezeichner)}`;
-        const res = await fetch(url);
-        if (!res.ok) {
-          console.warn('Trip route endpoint returned status:', res.status);
-          return;
-        }
-        const routeGeoJSON = await res.json();
+        const res = await fetch(`https://rest.busradar.conterra.de/prod/fahrten/${encodeURIComponent(fahrtbezeichner)}`);
+        if (!res.ok) return;
+        const data = await res.json();
 
-        currentRouteLayer = L.geoJSON(routeGeoJSON, {
-          style: {
-            color: '#0055b8',
-            weight: 5,
-            opacity: 0.85,
-            dashArray: '8, 8',
-            lineCap: 'round',
-            lineJoin: 'round'
-          }
-        }).addTo(map);
-
-        const routeCoords = [];
-        L.geoJSON(routeGeoJSON).eachLayer(layer => {
-          if (layer.getLatLngs) {
-            const latlngs = layer.getLatLngs();
-            const flat = Array.isArray(latlngs[0]) ? latlngs.flat(2) : latlngs;
-            flat.forEach(ll => routeCoords.push({ x: ll.lng, y: ll.lat }));
-          }
-        });
-
-        if (routeCoords.length < 2) return;
-
-        const thresholdSq = 0.0004 ** 2;
-        const addedStops = new Set();
-
-        allStopFeatures.forEach(stop => {
-          const sPt = { x: stop.lng, y: stop.lat };
-          let isNearRoute = false;
-
-          for (let i = 0; i < routeCoords.length - 1; i++) {
-            if (distToSegmentSquared(sPt, routeCoords[i], routeCoords[i + 1]) < thresholdSq) {
-              isNearRoute = true;
-              break;
+        // 1. Render the bold blue route line and white circular stop pins directly from the GeoJSON
+        const routeLayer = L.geoJSON(data, {
+          style: (feature) => {
+            if (feature.geometry.type === 'LineString' || feature.geometry.type === 'MultiLineString') {
+              return {
+                color: '#0055b8',
+                weight: 5,
+                opacity: 0.9,
+                lineCap: 'round',
+                lineJoin: 'round'
+              };
             }
-          }
-
-          if (isNearRoute && !addedStops.has(stop.name)) {
-            addedStops.add(stop.name);
-
-            const stopMarker = L.circleMarker([stop.lat, stop.lng], {
+          },
+          pointToLayer: (feature, latlng) => {
+            return L.circleMarker(latlng, {
               radius: 6,
               fillColor: '#ffffff',
               color: '#0055b8',
@@ -311,35 +261,29 @@
               opacity: 1,
               fillOpacity: 1
             });
-
-            stopMarker.bindPopup(`
-              <div style="font-size:13px; line-height: 1.4;">
-                <strong style="color: #0055b8;">Bus Station:</strong><br/>
-                <span style="font-weight: 600;">${stop.name}</span>
-              </div>
-            `);
-
-            stopMarker.on('click', (e) => {
-              L.DomEvent.stopPropagation(e);
-              if (activeStopPopup && activeStopPopup !== stopMarker.getPopup()) {
-                map.closePopup(activeStopPopup);
-              }
-              stopMarker.openPopup();
-              activeStopPopup = stopMarker.getPopup();
-            });
-
-            stopMarker.addTo(map);
-            currentStopMarkers.push(stopMarker);
+          },
+          onEachFeature: (feature, layer) => {
+            if (feature.geometry.type === 'Point') {
+              const name = feature.properties?.lbez || feature.properties?.kbez || feature.properties?.name || 'Bus Stop';
+              layer.bindPopup(`
+                <div style="font-size: 13px; line-height: 1.4;">
+                  <strong style="color: #0055b8;">Bus Station:</strong><br/>
+                  <span style="font-weight: 600;">${name}</span>
+                </div>
+              `);
+            }
           }
         });
 
+        currentRouteGroup.addLayer(routeLayer);
+
       } catch (err) {
-        console.warn('Failed to load trip route & stops:', err);
+        console.warn('Could not load route:', err);
       }
     }
 
     map.on('click', () => {
-      clearCurrentRouteAndStops();
+      clearCurrentRoute();
     });
 
     function updateDropdownOptions(newLines) {
@@ -389,7 +333,7 @@
 
     document.getElementById('line-filter').addEventListener('change', (e) => {
       selectedLineFilter = e.target.value;
-      clearCurrentRouteAndStops();
+      clearCurrentRoute();
       applyLineFilter();
     });
 
@@ -397,32 +341,20 @@
       try {
         const res = await fetch('https://rest.busradar.conterra.de/prod/haltestellen');
         const data = await res.json();
-        const features = data.features || [];
-
-        features.forEach(f => {
+        (data.features || []).forEach(f => {
           const props = f.properties || {};
           const nr = props.nr;
           const name = props.lbez || props.kbez;
           const coords = f.geometry && f.geometry.coordinates;
 
           if (nr !== undefined && nr !== null && name && coords) {
-            const nrStr = String(nr).trim();
-            const prefix5 = nrStr.substring(0, 5);
-            const stopObj = {
-              name: name,
-              fullNr: nrStr,
-              lat: coords[1],
-              lng: coords[0]
-            };
-
+            const prefix5 = String(nr).trim().substring(0, 5);
             if (!stopsLookup[prefix5]) stopsLookup[prefix5] = [];
-            stopsLookup[prefix5].push(stopObj);
-            allStopFeatures.push(stopObj);
+            stopsLookup[prefix5].push({ name, lat: coords[1], lng: coords[0] });
           }
         });
-        console.log(`Loaded ${allStopFeatures.length} stops.`);
       } catch (err) {
-        console.warn('Could not load haltestellen dictionary:', err);
+        console.warn('Haltestellen lookup failed:', err);
       }
     }
 
@@ -433,9 +365,8 @@
         
         const activeIds = new Set();
         const detectedLines = new Set();
-        const features = data.features || [];
 
-        features.forEach(bus => {
+        (data.features || []).forEach(bus => {
           const props = bus.properties || {};
           const id = props.fahrtbezeichner || props.fahrzeugid;
           if (!id || !bus.geometry || !bus.geometry.coordinates) return;
@@ -449,7 +380,7 @@
 
           activeIds.add(id);
           if (line) detectedLines.add(line);
-          markerData[id] = { line: line, fahrtbezeichner: fahrtbezeichner };
+          markerData[id] = { line: line };
 
           const popupContent = createPopupHTML(props, lat, lng);
           const shouldBeVisible = (selectedLineFilter === 'ALL' || line === selectedLineFilter);
@@ -473,19 +404,15 @@
 
             marker.fahrtbezeichner = fahrtbezeichner;
 
-            // Trigger route draw whenever the popup opens (click or programmatic)
-            marker.on('popupopen', () => {
+            marker.on('click', () => {
               showBusRoute(marker.fahrtbezeichner);
             });
 
-            if (shouldBeVisible) {
-              marker.addTo(map);
-            }
+            if (shouldBeVisible) marker.addTo(map);
             markers[id] = marker;
           }
         });
 
-        // Clean up inactive markers
         Object.keys(markers).forEach(id => {
           if (!activeIds.has(id)) {
             if (map.hasLayer(markers[id])) map.removeLayer(markers[id]);
@@ -499,10 +426,46 @@
         document.getElementById('last-updated').innerText = `Updated: ${new Date().toLocaleTimeString()}`;
 
       } catch (err) {
-        console.error('Error fetching bus data:', err);
-        document.getElementById('last-updated').innerText = 'Network error / Retrying...';
+        console.error('Error fetching buses:', err);
       }
     }
+
+    async function searchAddress() {
+      const query = document.getElementById('address-input').value.trim();
+      if (!query) return;
+
+      const nominatimUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query + ', Münster')}&viewbox=7.50,51.85,7.75,52.05&bounded=1&limit=1`;
+
+      try {
+        const res = await fetch(nominatimUrl);
+        const results = await res.json();
+        if (results && results.length > 0) {
+          const lat = parseFloat(results[0].lat);
+          const lon = parseFloat(results[0].lon);
+
+          if (searchMarker) map.removeLayer(searchMarker);
+
+          searchMarker = L.marker([lat, lon], {
+            icon: L.divIcon({
+              html: `<div style="background:#e11d48;color:#fff;padding:4px 8px;border-radius:12px;font-size:11px;font-weight:700;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.3);white-space:nowrap;">📍 Destination</div>`,
+              iconAnchor: [45, 15]
+            })
+          }).bindPopup(`<strong>Searched Location:</strong><br>${results[0].display_name}`).addTo(map);
+
+          map.flyTo([lat, lon], 16, { animate: true, duration: 1.5 });
+          searchMarker.openPopup();
+        } else {
+          alert('Address not found in Münster.');
+        }
+      } catch (err) {
+        console.error('Search error:', err);
+      }
+    }
+
+    document.getElementById('search-btn').addEventListener('click', searchAddress);
+    document.getElementById('address-input').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') searchAddress();
+    });
 
     (async () => {
       await loadStopsLookup();
