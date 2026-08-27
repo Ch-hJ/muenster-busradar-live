@@ -179,10 +179,20 @@
     const markers = {};
     const markerData = {};
     const stopsLookup = {};
+    let allStopFeatures = []; // flat list of every known stop, used for proximity-matching against a route line
     let currentRouteGroup = L.layerGroup().addTo(map);
     let searchMarker = null;
     let activeFahrtbezeichner = null;
     let routeRequestToken = 0; // guards against stale/late fetch responses overwriting a newer selection
+
+    // Squared distance from point p to segment v-w (in lat/lng "units", good enough for short local distances)
+    function distToSegmentSquared(p, v, w) {
+      const l2 = (w.x - v.x) ** 2 + (w.y - v.y) ** 2;
+      if (l2 === 0) return (p.x - v.x) ** 2 + (p.y - v.y) ** 2;
+      let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+      t = Math.max(0, Math.min(1, t));
+      return (p.x - (v.x + t * (w.x - v.x))) ** 2 + (p.y - (v.y + t * (w.y - v.y))) ** 2;
+    }
 
     let selectedLineFilter = 'ALL';
     const knownLines = new Set();
@@ -290,6 +300,7 @@
         if (myToken !== routeRequestToken) return;
 
         if (!res.ok) {
+          console.warn(`[route] /fahrten/${fahrtbezeichner} returned HTTP ${res.status}. This trip likely has no stored route shape (this endpoint is undocumented and doesn't cover all trips).`);
           showToast('Route data unavailable for this trip.');
           return;
         }
@@ -300,11 +311,17 @@
 
         const hasFeatures = data && Array.isArray(data.features) && data.features.length > 0;
         if (!hasFeatures) {
+          console.warn(`[route] /fahrten/${fahrtbezeichner} returned HTTP 200 but with no features. Raw response:`, data);
           showToast('No route path available for this bus.');
           return;
         }
 
-        // 1. Render the bold blue dashed route line and white circular stop pins from the GeoJSON
+        // 1. Render the bold blue dashed route line from the GeoJSON.
+        // Note: this endpoint is undocumented and its response typically contains only
+        // LineString geometry — it does NOT reliably include the individual stops as
+        // separate Point features. So stops are derived independently below, by
+        // checking which known city stops (from /haltestellen) lie on this line,
+        // rather than trusting the /fahrten response to enumerate them itself.
         const routeLayer = L.geoJSON(data, {
           style: (feature) => {
             if (feature.geometry.type === 'LineString' || feature.geometry.type === 'MultiLineString') {
@@ -317,31 +334,60 @@
                 dashArray: '1, 10'
               };
             }
-          },
-          pointToLayer: (feature, latlng) => {
-            return L.circleMarker(latlng, {
-              radius: 7,
-              fillColor: '#ffffff',
-              color: '#0055b8',
-              weight: 3,
-              opacity: 1,
-              fillOpacity: 1
-            });
-          },
-          onEachFeature: (feature, layer) => {
-            if (feature.geometry.type === 'Point') {
-              const name = feature.properties?.lbez || feature.properties?.kbez || feature.properties?.name || 'Bus Stop';
-              layer.bindPopup(`
-                <div style="font-size: 13px; line-height: 1.4;">
-                  <strong style="color: #0055b8;">Bus Station:</strong><br/>
-                  <span style="font-weight: 600;">${name}</span>
-                </div>
-              `);
-            }
           }
         });
 
         currentRouteGroup.addLayer(routeLayer);
+
+        // 2. Flatten the line's coordinates so we can measure distance from each known stop to the route.
+        const routeCoords = [];
+        routeLayer.eachLayer(layer => {
+          if (layer.getLatLngs) {
+            const latlngs = layer.getLatLngs();
+            const flat = Array.isArray(latlngs[0]) ? latlngs.flat(2) : latlngs;
+            flat.forEach(ll => routeCoords.push({ x: ll.lng, y: ll.lat }));
+          }
+        });
+
+        // 3. Find every known stop within ~40m of the route line and pin it with a white circle marker.
+        if (routeCoords.length >= 2) {
+          const thresholdSq = 0.0004 ** 2;
+          const addedStops = new Set();
+
+          allStopFeatures.forEach(stop => {
+            const sPt = { x: stop.lng, y: stop.lat };
+            let isNearRoute = false;
+
+            for (let i = 0; i < routeCoords.length - 1; i++) {
+              if (distToSegmentSquared(sPt, routeCoords[i], routeCoords[i + 1]) < thresholdSq) {
+                isNearRoute = true;
+                break;
+              }
+            }
+
+            if (isNearRoute && !addedStops.has(stop.name)) {
+              addedStops.add(stop.name);
+
+              const stopMarker = L.circleMarker([stop.lat, stop.lng], {
+                radius: 7,
+                fillColor: '#ffffff',
+                color: '#0055b8',
+                weight: 3,
+                opacity: 1,
+                fillOpacity: 1
+              });
+
+              stopMarker.bindPopup(`
+                <div style="font-size: 13px; line-height: 1.4;">
+                  <strong style="color: #0055b8;">Bus Station:</strong><br/>
+                  <span style="font-weight: 600;">${stop.name}</span>
+                </div>
+              `);
+
+              currentRouteGroup.addLayer(stopMarker);
+            }
+          });
+        }
 
         // Make sure the whole route is visible, even if it extends off the current view.
         const bounds = routeLayer.getBounds();
@@ -423,9 +469,12 @@
           const coords = f.geometry && f.geometry.coordinates;
 
           if (nr !== undefined && nr !== null && name && coords) {
-            const prefix5 = String(nr).trim().substring(0, 5);
+            const nrStr = String(nr).trim();
+            const prefix5 = nrStr.substring(0, 5);
+            const stopObj = { name, fullNr: nrStr, lat: coords[1], lng: coords[0] };
             if (!stopsLookup[prefix5]) stopsLookup[prefix5] = [];
-            stopsLookup[prefix5].push({ name, lat: coords[1], lng: coords[0] });
+            stopsLookup[prefix5].push(stopObj);
+            allStopFeatures.push(stopObj);
           }
         });
       } catch (err) {
